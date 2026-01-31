@@ -1,0 +1,347 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Chess } from 'chess.js';
+
+// --- Constants & Utilities ---
+const PIECES = {
+  p: '♟', r: '♜', n: '♞', b: '♝', q: '♛', k: '♚',
+  P: '♙', R: '♖', N: '♘', B: '♗', Q: '♕', K: '♔'
+};
+
+const PIECE_VALUES = {
+  p: 10, r: 50, n: 30, b: 30, q: 90, k: 900,
+  P: 10, R: 50, N: 30, B: 30, Q: 90, K: 900
+};
+
+// Simple positional tables to make the AI a bit "smarter" about placement
+const PAWN_TABLE = [
+  [0,  0,  0,  0,  0,  0,  0,  0],
+  [50, 50, 50, 50, 50, 50, 50, 50],
+  [10, 10, 20, 30, 30, 20, 10, 10],
+  [5,  5, 10, 25, 25, 10,  5,  5],
+  [0,  0,  0, 20, 20,  0,  0,  0],
+  [5, -5,-10,  0,  0,-10, -5,  5],
+  [5, 10, 10,-20,-20, 10, 10,  5],
+  [0,  0,  0,  0,  0,  0,  0,  0]
+];
+
+// --- AI Logic (Minimax) ---
+const evaluateBoard = (game) => {
+  let totalEvaluation = 0;
+  const board = game.board();
+
+  for (let i = 0; i < 8; i++) {
+    for (let j = 0; j < 8; j++) {
+      const piece = board[i][j];
+      if (piece) {
+        let val = PIECE_VALUES[piece.type];
+        // Add positional bonus for pawns
+        if (piece.type === 'p') {
+          val += (piece.color === 'w' ? PAWN_TABLE[i][j] : PAWN_TABLE[7 - i][j]) * 0.1;
+        }
+        totalEvaluation += (piece.color === 'w' ? val : -val);
+      }
+    }
+  }
+  return totalEvaluation;
+};
+
+const minimax = (game, depth, alpha, beta, isMaximizing) => {
+  if (depth === 0 || game.isGameOver()) {
+    return -evaluateBoard(game);
+  }
+
+  const moves = game.moves();
+
+  if (isMaximizing) {
+    let bestEval = -Infinity;
+    for (const move of moves) {
+      game.move(move);
+      const evaluation = minimax(game, depth - 1, alpha, beta, false);
+      game.undo();
+      bestEval = Math.max(bestEval, evaluation);
+      alpha = Math.max(alpha, evaluation);
+      if (beta <= alpha) break;
+    }
+    return bestEval;
+  } else {
+    let bestEval = Infinity;
+    for (const move of moves) {
+      game.move(move);
+      const evaluation = minimax(game, depth - 1, alpha, beta, true);
+      game.undo();
+      bestEval = Math.min(bestEval, evaluation);
+      beta = Math.min(beta, evaluation);
+      if (beta <= alpha) break;
+    }
+    return bestEval;
+  }
+};
+
+const getBestMove = (game) => {
+  const moves = game.moves();
+  let bestMove = null;
+  let bestValue = -Infinity;
+
+  // Add small randomness for equal moves
+  moves.sort(() => Math.random() - 0.5);
+
+  for (const move of moves) {
+    game.move(move);
+    const boardValue = minimax(game, 2, -Infinity, Infinity, false);
+    game.undo();
+    if (boardValue > bestValue) {
+      bestValue = boardValue;
+      bestMove = move;
+    }
+  }
+  return bestMove;
+};
+
+// --- Components ---
+
+export default function App() {
+  const [game, setGame] = useState(new Chess());
+  const [selectedSquare, setSelectedSquare] = useState(null);
+  const [moveHistory, setMoveHistory] = useState([]);
+  const [isGameOver, setIsGameOver] = useState(false);
+  const [status, setStatus] = useState("Your turn (White)");
+  const [hint, setHint] = useState(null);
+
+  const makeMove = useCallback((moveData) => {
+    try {
+      const result = game.move(moveData);
+      if (result) {
+        setGame(new Chess(game.fen()));
+        setMoveHistory(prev => [...prev, result.san]);
+        return true;
+      }
+    } catch (e) {
+      return false;
+    }
+    return false;
+  }, [game]);
+
+  // AI Turn Effect
+  useEffect(() => {
+    if (game.turn() === 'b' && !game.isGameOver()) {
+      setStatus("Computer is thinking...");
+      const timer = setTimeout(() => {
+        const bestMove = getBestMove(game);
+        if (bestMove) {
+          makeMove(bestMove);
+          setStatus("Your turn (White)");
+        }
+      }, 500);
+      return () => clearTimeout(timer);
+    }
+
+    if (game.isGameOver()) {
+      setIsGameOver(true);
+      if (game.isCheckmate()) setStatus(`Checkmate! ${game.turn() === 'w' ? 'Black' : 'White'} wins.`);
+      else if (game.isDraw()) setStatus("Draw!");
+      else setStatus("Game Over");
+    }
+  }, [game, makeMove]);
+
+  const onSquareClick = (square) => {
+    if (isGameOver || game.turn() === 'b') return;
+
+    if (selectedSquare === square) {
+      setSelectedSquare(null);
+      return;
+    }
+
+    // Attempt to move
+    if (selectedSquare) {
+      const moveSuccess = makeMove({
+        from: selectedSquare,
+        to: square,
+        promotion: 'q' // Default promotion to queen
+      });
+
+      if (moveSuccess) {
+        setSelectedSquare(null);
+        return;
+      }
+    }
+
+    // Select piece if it belongs to current player
+    const piece = game.get(square);
+    if (piece && piece.color === game.turn()) {
+      setSelectedSquare(square);
+    } else {
+      setSelectedSquare(null);
+    }
+  };
+
+  const resetGame = () => {
+    const newGame = new Chess();
+    setGame(newGame);
+    setMoveHistory([]);
+    setIsGameOver(false);
+    setSelectedSquare(null);
+    setStatus("Your turn (White)");
+  };
+
+  const undoMove = () => {
+    if (moveHistory.length >= 2) {
+      game.undo(); // Undo computer
+      game.undo(); // Undo player
+      setGame(new Chess(game.fen()));
+      setMoveHistory(prev => prev.slice(0, -2));
+      setIsGameOver(false);
+      setStatus("Your turn (White)");
+    }
+  };
+
+  const board = game.board();
+  const labels = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+
+  return (
+    <div className="min-h-screen bg-neutral-900 text-white flex flex-col items-center p-4 font-sans">
+      <header className="mb-6 text-center">
+        <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-400 to-indigo-500 bg-clip-text text-transparent">
+          Grandmaster JS
+        </h1>
+        <p className="text-neutral-400 mt-2">1 vs Computer Challenge</p>
+      </header>
+
+      <div className="flex flex-col lg:flex-row gap-8 w-full max-w-5xl">
+        {/* Left: Game Board */}
+        <div className="flex-1 flex flex-col items-center">
+          <div className="mb-4 text-lg font-medium flex items-center gap-3">
+            <div className={`w-3 h-3 rounded-full ${game.turn() === 'w' ? 'bg-white shadow-[0_0_8px_white]' : 'bg-neutral-600'}`}></div>
+            {status}
+          </div>
+
+          <div className="relative bg-neutral-800 p-2 rounded-lg shadow-2xl">
+            {/* The Grid */}
+            <div className="grid grid-cols-8 border-2 border-neutral-700">
+              {board.map((row, i) => 
+                row.map((cell, j) => {
+                  const squareCode = `${labels[j]}${8 - i}`;
+                  const isDark = (i + j) % 2 === 1;
+                  const isSelected = selectedSquare === squareCode;
+                  const lastMove = game.history({ verbose: true }).pop();
+                  const isLastMove = lastMove && (lastMove.from === squareCode || lastMove.to === squareCode);
+                  const isCheck = game.inCheck() && cell?.type === 'k' && cell?.color === game.turn();
+
+                  return (
+                    <div
+                      key={squareCode}
+                      onClick={() => onSquareClick(squareCode)}
+                      className={`
+                        w-10 h-10 sm:w-14 sm:h-14 md:w-16 md:h-16 flex items-center justify-center text-3xl sm:text-4xl cursor-pointer transition-all relative
+                        ${isDark ? 'bg-neutral-700' : 'bg-neutral-500'}
+                        ${isSelected ? 'ring-4 ring-blue-400 ring-inset z-10' : ''}
+                        ${isLastMove ? 'bg-yellow-900/40' : ''}
+                        ${isCheck ? 'bg-red-600/60 animate-pulse' : ''}
+                        hover:opacity-80
+                      `}
+                    >
+                      {/* Coordinates */}
+                      {j === 0 && <span className="absolute left-0.5 top-0.5 text-[8px] sm:text-[10px] opacity-40">{8 - i}</span>}
+                      {i === 7 && <span className="absolute right-0.5 bottom-0.5 text-[8px] sm:text-[10px] opacity-40">{labels[j]}</span>}
+                      
+                      {/* Piece */}
+                      {cell && (
+                        <span className={`select-none ${cell.color === 'w' ? 'text-white drop-shadow-md' : 'text-black'}`}>
+                          {PIECES[cell.color === 'w' ? cell.type.toUpperCase() : cell.type]}
+                        </span>
+                      )}
+
+                      {/* Move Hint */}
+                      {selectedSquare && game.moves({ square: selectedSquare, verbose: true }).some(m => m.to === squareCode) && (
+                        <div className="absolute w-3 h-3 sm:w-4 sm:h-4 rounded-full bg-black/20 pointer-events-none"></div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {isGameOver && (
+              <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex flex-col items-center justify-center rounded-lg animate-in fade-in duration-300">
+                <h2 className="text-3xl font-bold mb-4">Game Over</h2>
+                <p className="text-xl mb-6 text-blue-300">{status}</p>
+                <button 
+                  onClick={resetGame}
+                  className="px-6 py-2 bg-blue-600 hover:bg-blue-500 rounded-full font-bold transition-transform active:scale-95"
+                >
+                  Play Again
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Right: Controls and History */}
+        <div className="w-full lg:w-72 flex flex-col gap-4">
+          <div className="bg-neutral-800 p-4 rounded-xl border border-neutral-700">
+            <h3 className="font-bold mb-4 border-b border-neutral-700 pb-2 flex items-center gap-2">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20v-6M9 20v-10M15 20v-2M6 20v-4M18 20v-8"/></svg>
+              Game Controls
+            </h3>
+            <div className="grid grid-cols-1 gap-2">
+              <button 
+                onClick={resetGame}
+                className="w-full py-2 bg-neutral-700 hover:bg-neutral-600 rounded-lg text-sm font-medium transition-colors"
+              >
+                New Game
+              </button>
+              <button 
+                onClick={undoMove}
+                disabled={moveHistory.length < 2}
+                className="w-full py-2 bg-neutral-700 hover:bg-neutral-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-sm font-medium transition-colors"
+              >
+                Undo Move
+              </button>
+            </div>
+          </div>
+
+          <div className="bg-neutral-800 p-4 rounded-xl border border-neutral-700 flex-1 overflow-hidden flex flex-col">
+            <h3 className="font-bold mb-4 border-b border-neutral-700 pb-2 flex items-center gap-2">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>
+              Move History
+            </h3>
+            <div className="overflow-y-auto max-h-48 lg:max-h-none flex-1 pr-2 custom-scrollbar">
+              {moveHistory.length === 0 ? (
+                <p className="text-neutral-500 text-sm italic text-center py-4">No moves yet</p>
+              ) : (
+                <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+                  {Array.from({ length: Math.ceil(moveHistory.length / 2) }).map((_, i) => (
+                    <React.Fragment key={i}>
+                      <div className="flex justify-between border-b border-neutral-700/50 py-1">
+                        <span className="text-neutral-500 w-6">{i + 1}.</span>
+                        <span className="font-mono">{moveHistory[i * 2]}</span>
+                      </div>
+                      <div className="flex justify-end border-b border-neutral-700/50 py-1">
+                        <span className="font-mono">{moveHistory[i * 2 + 1] || ''}</span>
+                      </div>
+                    </React.Fragment>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <style dangerouslySetInnerHTML={{ __html: `
+        .custom-scrollbar::-webkit-scrollbar {
+          width: 4px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+          background: transparent;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+          background: #444;
+          border-radius: 10px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+          background: #555;
+        }
+      `}} />
+    </div>
+  );
+}
